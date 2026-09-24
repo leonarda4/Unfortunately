@@ -34,6 +34,10 @@ python holistic.py
 macOS must grant camera and microphone access to Terminal or VS Code. The first
 response downloads the selected Whisper model. Use `--model base.en` for more
 accurate transcription, or `--emotion-interval 30` on slower machines.
+If a QT Py sensor board is connected, its latest heart rate, SpO2, GSR change,
+level, trend, and spike count appear during the come-closer phase and are
+included in the terminal summary. Use `--sensor-port /dev/cu.usbmodemXXXX` to
+select a port, or `--no-sensors` to disable serial readings.
 
 ## Controls
 

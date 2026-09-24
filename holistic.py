@@ -6,11 +6,14 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+import glob
+import json
 from pathlib import Path
 
 import cv2
 import mediapipe as mp
 import numpy as np
+import serial
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from mediapipe.tasks import python as mp_python
@@ -24,6 +27,7 @@ DEFAULT_MODEL = Path(__file__).with_name("models") / "holistic_landmarker.task"
 EMOTION_INTERVAL = 15
 BLINK_THRESHOLD = 0.21
 BLINK_MIN_FRAMES = 2
+SENSOR_BAUD = 115200
 
 
 @dataclass
@@ -37,6 +41,20 @@ class VisualMetrics:
     eyes_closed_frames: int = 0
 
 
+@dataclass
+class SensorMetrics:
+    connected: bool = False
+    phase: str = "offline"
+    hr: object = None
+    spo2: object = None
+    gsr_change: object = None
+    gsr_trend: object = None
+    level: str = "-"
+    trend: str = "-"
+    spikes: object = None
+    error: str = ""
+
+
 def speak(message):
     """Speak without blocking the camera preview on macOS."""
     subprocess.Popen(
@@ -44,6 +62,47 @@ def speak(message):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def find_sensor_port():
+    ports = glob.glob("/dev/cu.usbmodem*")
+    return ports[0] if ports else None
+
+
+def sensor_worker(port_name, metrics, stop_event):
+    """Read QT Py JSON samples without blocking the camera loop."""
+    try:
+        port = serial.Serial(port_name, SENSOR_BAUD, timeout=1)
+    except Exception as error:
+        metrics.error = f"Sensor unavailable: {error}"
+        return
+
+    metrics.connected = True
+    metrics.error = ""
+    try:
+        while not stop_event.is_set():
+            line = port.readline().decode(errors="ignore").strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "event" in message:
+                continue
+            metrics.phase = message.get("phase", metrics.phase)
+            metrics.hr = message.get("hr")
+            metrics.spo2 = message.get("spo2")
+            metrics.gsr_change = message.get("gsr_change")
+            metrics.gsr_trend = message.get("gsr_trend")
+            metrics.level = message.get("level") or "-"
+            metrics.trend = message.get("trend") or "-"
+            metrics.spikes = message.get("spikes")
+    except Exception as error:
+        metrics.error = f"Sensor read error: {error}"
+    finally:
+        metrics.connected = False
+        port.close()
 
 
 def landmark_group(collection):
@@ -162,7 +221,7 @@ def emotion_worker(emotion_queue, metrics, stop_event):
             metrics.emotion_error = f"Emotion error: {error}"
 
 
-def print_response_metrics(dashboard, visual_metrics):
+def print_response_metrics(dashboard, visual_metrics, sensor_metrics):
     """Print the completed response in a terminal-friendly format."""
     print("\n--- Voice response ---")
     print(f"Transcription: {dashboard.transcript}")
@@ -181,6 +240,10 @@ def print_response_metrics(dashboard, visual_metrics):
     print(f"Dominant emotion: {visual_metrics.emotion} ({visual_metrics.emotion_confidence:.1f}%)")
     print(f"Blink count: {visual_metrics.blink_count}")
     print(f"Looking at camera: {'yes' if visual_metrics.looking_at_camera else 'no'}")
+    print(f"Sensor HR / SpO2: {sensor_metrics.hr or '-'} bpm / {sensor_metrics.spo2 or '-'}%")
+    print(f"Sensor GSR change / trend: {sensor_metrics.gsr_change or '-'}% / {sensor_metrics.gsr_trend or '-'}%/min")
+    print(f"Sensor level / trend: {sensor_metrics.level} / {sensor_metrics.trend}")
+    print(f"Sensor spikes: {sensor_metrics.spikes if sensor_metrics.spikes is not None else '-'}")
     print("----------------------\n", flush=True)
 
 
@@ -223,6 +286,8 @@ def main():
     parser.add_argument("--model", default="tiny.en", help="Whisper model used after the response, e.g. base.en.")
     parser.add_argument("--emotion-interval", type=int, default=EMOTION_INTERVAL, help="Analyze every N camera frames.")
     parser.add_argument("--holistic-model", type=Path, default=DEFAULT_MODEL, help="MediaPipe Holistic .task model path.")
+    parser.add_argument("--sensor-port", default=None, help="QT Py serial port; auto-detected if omitted.")
+    parser.add_argument("--no-sensors", action="store_true", help="Disable QT Py serial readings.")
     args = parser.parse_args()
 
     camera = cv2.VideoCapture(args.camera, cv2.CAP_AVFOUNDATION)
@@ -232,7 +297,21 @@ def main():
     audio_queue = queue.Queue()
     dashboard = Dashboard(prompt=QUESTION)
     visual_metrics = VisualMetrics()
+    sensor_metrics = SensorMetrics()
     audio_stream = None
+    sensor_stop = threading.Event()
+    sensor_thread = None
+    if not args.no_sensors:
+        sensor_port = args.sensor_port or find_sensor_port()
+        if sensor_port:
+            sensor_thread = threading.Thread(
+                target=sensor_worker,
+                args=(sensor_port, sensor_metrics, sensor_stop),
+                daemon=True,
+            )
+            sensor_thread.start()
+        else:
+            sensor_metrics.error = "No QT Py found"
     emotion_queue = queue.Queue(maxsize=1)
     emotion_stop = threading.Event()
     emotion_thread = threading.Thread(
@@ -310,7 +389,7 @@ def main():
                     if dashboard.error:
                         print(dashboard.error, flush=True)
                     else:
-                        print_response_metrics(dashboard, visual_metrics)
+                        print_response_metrics(dashboard, visual_metrics, sensor_metrics)
 
                 transcription_thread = threading.Thread(target=transcribe_and_print, daemon=True)
                 transcription_thread.start()
@@ -400,6 +479,17 @@ def main():
                 cv2.putText(frame, gaze_label, (frame.shape[1] - 230, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.55, gaze_color, 2)
                 cv2.putText(frame, f"Emotion: {visual_metrics.emotion} ({visual_metrics.emotion_confidence:.0f}%)", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 220, 100), 2)
                 cv2.putText(frame, f"Blinks: {visual_metrics.blink_count}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 220, 100), 2)
+                if completion_announced:
+                    if sensor_metrics.connected:
+                        sensor_text = (
+                            f"Sensors HR {sensor_metrics.hr or '--'} | SpO2 {sensor_metrics.spo2 or '--'}% | "
+                            f"GSR {sensor_metrics.gsr_change or '--'}% | {sensor_metrics.level}/{sensor_metrics.trend}"
+                        )
+                        sensor_color = (220, 220, 220)
+                    else:
+                        sensor_text = "Sensors: offline (use --no-sensors to hide)"
+                        sensor_color = (120, 120, 120)
+                    cv2.putText(frame, sensor_text, (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.52, sensor_color, 2)
                 cv2.imshow("Holistic Landmarker", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -411,6 +501,7 @@ def main():
                     listening_started = False
                     recording, levels, speech_flags = [], [], []
     finally:
+        sensor_stop.set()
         emotion_stop.set()
         if audio_stream is not None:
             audio_stream.stop()

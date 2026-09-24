@@ -3,6 +3,7 @@ mediapipe==0.10.35
 protobuf==4.25.9
 sounddevice
 soundfile
+pyserial
 faster-whisper
 deepface
 tensorflow==2.15.1
