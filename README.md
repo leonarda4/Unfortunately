@@ -36,9 +36,12 @@ For a plain face, pose, and hand landmark preview, use a separate environment so
 MediaPipe does not conflict with the TensorFlow dependencies used by DeepFace:
 
 ```bash
-python3.9 -m venv .venv-holistic
+python3 -m pip install --user uv
+export PATH="$HOME/Library/Python/3.9/bin:$PATH"
+uv python install 3.11
+uv venv --python 3.11 .venv-holistic
 source .venv-holistic/bin/activate
-pip install -r requirements-holistic.txt
+uv pip install -r requirements-holistic.txt
 python holistic.py
 ```
 
