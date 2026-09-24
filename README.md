@@ -43,6 +43,10 @@ python holistic.py
 ```
 
 Press `q` to quit. Use `python holistic.py --camera 1` for another camera.
+The Holistic environment uses the native arm64 MediaPipe Tasks package. On
+older universal Python 3.9 installations, `pip check` may still report a
+grpcio platform warning even though the import and runtime checks pass; Python
+3.11+ arm64 removes that package metadata warning.
 
 The Holistic preview now asks the user to lift their right hand. When the
 semantic right wrist is detected above the right shoulder, it announces

@@ -6,20 +6,21 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import mediapipe as mp
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
 
 from voice_interaction import BLOCK_SIZE, SAMPLE_RATE, Dashboard, Response, compute_metrics, dbfs, transcribe
 
 
-mp_holistic = mp.solutions.holistic
-mp_drawing = mp.solutions.drawing_utils
-mp_styles = mp.solutions.drawing_styles
 QUESTION = "What is something that made you feel proud recently?"
+DEFAULT_MODEL = Path(__file__).with_name("models") / "holistic_landmarker.task"
 EMOTION_INTERVAL = 15
 BLINK_THRESHOLD = 0.21
 BLINK_MIN_FRAMES = 2
@@ -50,8 +51,10 @@ def right_hand_is_raised(results):
     if not results.right_hand_landmarks or not results.pose_landmarks:
         return False
 
-    wrist = results.right_hand_landmarks.landmark[mp_holistic.HandLandmark.WRIST]
-    shoulder = results.pose_landmarks.landmark[mp_holistic.PoseLandmark.RIGHT_SHOULDER]
+    if not results.right_hand_landmarks[0] or not results.pose_landmarks[0]:
+        return False
+    wrist = results.right_hand_landmarks[0][0]
+    shoulder = results.pose_landmarks[0][12]
     return wrist.y < shoulder.y - 0.05
 
 
@@ -172,33 +175,34 @@ def print_response_metrics(dashboard, visual_metrics):
 
 
 def draw_landmarks(frame, results):
-    mp_drawing.draw_landmarks(
-        frame,
-        results.face_landmarks,
-        mp_holistic.FACEMESH_TESSELATION,
-        landmark_drawing_spec=None,
-        connection_drawing_spec=mp_styles.get_default_face_mesh_tesselation_style(),
+    height, width = frame.shape[:2]
+
+    def point(landmark):
+        return int(landmark.x * width), int(landmark.y * height)
+
+    if results.face_landmarks:
+        for landmark in results.face_landmarks[0][::8]:
+            cv2.circle(frame, point(landmark), 1, (80, 220, 120), -1)
+    for landmarks, color in (
+        (results.pose_landmarks, (255, 180, 0)),
+        (results.left_hand_landmarks, (0, 180, 255)),
+        (results.right_hand_landmarks, (255, 80, 180)),
+    ):
+        if landmarks:
+            for landmark in landmarks[0]:
+                cv2.circle(frame, point(landmark), 2, color, -1)
+
+
+def create_landmarker(model_path):
+    options = mp_vision.HolisticLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=str(model_path)),
+        running_mode=mp_vision.RunningMode.VIDEO,
+        min_face_detection_confidence=0.5,
+        min_face_landmarks_confidence=0.5,
+        min_pose_detection_confidence=0.5,
+        min_hand_landmarks_confidence=0.5,
     )
-    mp_drawing.draw_landmarks(
-        frame,
-        results.pose_landmarks,
-        mp_holistic.POSE_CONNECTIONS,
-        landmark_drawing_spec=mp_styles.get_default_pose_landmarks_style(),
-    )
-    mp_drawing.draw_landmarks(
-        frame,
-        results.left_hand_landmarks,
-        mp_holistic.HAND_CONNECTIONS,
-        mp_styles.get_default_hand_landmarks_style(),
-        mp_styles.get_default_hand_connections_style(),
-    )
-    mp_drawing.draw_landmarks(
-        frame,
-        results.right_hand_landmarks,
-        mp_holistic.HAND_CONNECTIONS,
-        mp_styles.get_default_hand_landmarks_style(),
-        mp_styles.get_default_hand_connections_style(),
-    )
+    return mp_vision.HolisticLandmarker.create_from_options(options)
 
 
 def main():
@@ -206,6 +210,7 @@ def main():
     parser.add_argument("--camera", type=int, default=0, help="Camera index (default: 0).")
     parser.add_argument("--model", default="tiny.en", help="Whisper model used after the response, e.g. base.en.")
     parser.add_argument("--emotion-interval", type=int, default=EMOTION_INTERVAL, help="Analyze every N camera frames.")
+    parser.add_argument("--holistic-model", type=Path, default=DEFAULT_MODEL, help="MediaPipe Holistic .task model path.")
     args = parser.parse_args()
 
     camera = cv2.VideoCapture(args.camera, cv2.CAP_AVFOUNDATION)
@@ -239,15 +244,9 @@ def main():
             callback=audio_callback,
         )
         audio_stream.start()
-        with mp_holistic.Holistic(
-            static_image_mode=False,
-            model_complexity=1,
-            smooth_landmarks=True,
-            enable_segmentation=False,
-            refine_face_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        ) as holistic:
+        if not args.holistic_model.is_file():
+            raise SystemExit(f"Unable to find Holistic model: {args.holistic_model}")
+        with create_landmarker(args.holistic_model) as holistic:
             speak("Please lift your right hand")
             hand_detected = False
             completion_announced = False
@@ -310,9 +309,8 @@ def main():
                     break
 
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                rgb_frame.flags.writeable = False
-                results = holistic.process(rgb_frame)
-                rgb_frame.flags.writeable = True
+                image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                results = holistic.detect_for_video(image, frame_number * 33)
                 draw_landmarks(frame, results)
                 frame_number += 1
 
