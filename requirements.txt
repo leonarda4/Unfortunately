@@ -1,3 +1,4 @@
-opencv-python
-deepface
+opencv-python<5
+deepface[tensorflow]
 tf_keras
+urllib3<2

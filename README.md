@@ -10,6 +10,63 @@ This is probably the shortest code to implement realtime emotion monitoring.
 - [OpenCV](https://opencv.org/): An open-source computer vision library used for image and video processing.
 
 ## Usage
+### Pulse color visualization
+
+The separate `pulse.py` script uses a rolling Eulerian temporal bandpass to amplify
+subtle color changes and micro facial movements in the detected face. The default
+mode combines both effects after the history buffer warms up:
+
+```bash
+python pulse.py
+```
+
+Press `q` to quit. The defaults use a 0.7-2.0 Hz pulse band, 40x chroma
+amplification, 20x motion amplification, and a five-second rolling history. Use
+`--mode motion` for micro-expressions only, or `--mode color` for pulse color only.
+Adjust the motion effect with `--motion-amplification`, for example:
+`python pulse.py --mode motion --low 0.5 --high 3.0 --motion-amplification 15`.
+The `Pulse Signal` window collapses the face ROI into a rolling red/green pulse
+trace and estimates BPM from its strongest frequency. The red/green label is a
+camera-color heuristic, so use the graph and BPM as the primary comparison with
+your actual pulse.
+
+### MediaPipe Holistic preview
+
+For a plain face, pose, and hand landmark preview, use a separate environment so
+MediaPipe does not conflict with the TensorFlow dependencies used by DeepFace:
+
+```bash
+python3.9 -m venv .venv-holistic
+source .venv-holistic/bin/activate
+pip install -r requirements-holistic.txt
+python holistic.py
+```
+
+Press `q` to quit. Use `python holistic.py --camera 1` for another camera.
+
+### Voice interaction prototype
+
+The `voice_interaction.py` prototype speaks a prompt with macOS text-to-speech,
+listens through the microphone, ends the response after silence, transcribes it
+with `faster-whisper`, and displays the tracked speech metrics in an OpenCV
+window. It measures the audio signal separately from the transcript, so pauses
+and response latency are retained.
+
+Install the voice dependencies in a separate environment if desired:
+
+```bash
+python3 -m venv .venv-voice
+source .venv-voice/bin/activate
+pip install -r requirements-voice.txt
+python voice_interaction.py
+```
+
+The first run downloads the Whisper model. Press `q` to quit, `r` to repeat the
+prompt, or the space bar to end a response immediately. Adjust endpointing with
+`--silence 1.5`, use `--model base.en` for more accurate transcription, or
+provide a custom prompt with `--prompt "Describe your morning."`. macOS must
+grant microphone access to Terminal or VS Code.
+
 ### Initial steps:
 - Git clone this repository Run: `git clone https://github.com/manish-9245/Facial-Emotion-Recognition-using-OpenCV-and-Deepface.git`
 - Run: `cd Facial-Emotion-Recognition-using-OpenCV-and-Deepface`

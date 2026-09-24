@@ -5,11 +5,21 @@ from deepface import DeepFace
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 # Start capturing video
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+
+if not cap.isOpened():
+    raise SystemExit(
+        "Unable to open the camera. Allow camera access for your terminal or VS Code in "
+        "System Settings > Privacy & Security > Camera, then try again."
+    )
 
 while True:
     # Capture frame-by-frame
     ret, frame = cap.read()
+
+    if not ret or frame is None:
+        print("Unable to read a frame from the camera; stopping.")
+        break
 
     # Convert frame to grayscale
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
