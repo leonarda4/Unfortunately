@@ -1,3 +1,6 @@
 opencv-python<5
 mediapipe==0.10.21
 protobuf==4.25.9
+sounddevice
+soundfile
+faster-whisper

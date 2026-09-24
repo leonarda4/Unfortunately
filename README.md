@@ -46,8 +46,12 @@ Press `q` to quit. Use `python holistic.py --camera 1` for another camera.
 
 The Holistic preview now asks the user to lift their right hand. When the
 semantic right wrist is detected above the right shoulder, it announces
-“Scanning complete, come closer” and keeps that status visible in the preview.
-Speech uses the macOS `say` command.
+“Scanning complete, come closer”, asks a question, and listens for the answer.
+Press the space bar to finish the response. The Whisper transcription and
+speech metrics are printed in the terminal. This requires the voice packages
+listed in `requirements-holistic.txt`; the first response downloads the chosen
+Whisper model. Use `python holistic.py --model base.en` for more accurate
+transcription.
 
 ### Voice interaction prototype
 
