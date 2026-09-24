@@ -46,15 +46,25 @@ def speak(message):
     )
 
 
+def landmark_group(collection):
+    """Normalize Tasks results that may be flat or wrapped in one face/group."""
+    if not collection:
+        return []
+    first = collection[0]
+    return collection if hasattr(first, "x") else first
+
+
 def right_hand_is_raised(results):
     """Return true when the user's semantic right wrist is above the shoulder."""
     if not results.right_hand_landmarks or not results.pose_landmarks:
         return False
 
-    if not results.right_hand_landmarks[0] or not results.pose_landmarks[0]:
+    hand_landmarks = landmark_group(results.right_hand_landmarks)
+    pose_landmarks = landmark_group(results.pose_landmarks)
+    if not hand_landmarks or not pose_landmarks:
         return False
-    wrist = results.right_hand_landmarks[0][0]
-    shoulder = results.pose_landmarks[0][12]
+    wrist = hand_landmarks[0]
+    shoulder = pose_landmarks[12]
     return wrist.y < shoulder.y - 0.05
 
 
@@ -180,16 +190,18 @@ def draw_landmarks(frame, results):
     def point(landmark):
         return int(landmark.x * width), int(landmark.y * height)
 
-    if results.face_landmarks:
-        for landmark in results.face_landmarks[0][::8]:
+    face_landmarks = landmark_group(results.face_landmarks)
+    if face_landmarks:
+        for landmark in face_landmarks[::8]:
             cv2.circle(frame, point(landmark), 1, (80, 220, 120), -1)
     for landmarks, color in (
         (results.pose_landmarks, (255, 180, 0)),
         (results.left_hand_landmarks, (0, 180, 255)),
         (results.right_hand_landmarks, (255, 80, 180)),
     ):
-        if landmarks:
-            for landmark in landmarks[0]:
+        group = landmark_group(landmarks)
+        if group:
+            for landmark in group:
                 cv2.circle(frame, point(landmark), 2, color, -1)
 
 
@@ -315,7 +327,7 @@ def main():
                 frame_number += 1
 
                 if results.face_landmarks:
-                    face_landmarks = results.face_landmarks[0]
+                    face_landmarks = landmark_group(results.face_landmarks)
                     update_blink_count(face_landmarks, visual_metrics)
                     visual_metrics.looking_at_camera, visual_metrics.gaze_available = gaze_is_camera_facing(face_landmarks)
                     if completion_announced and frame_number % max(1, args.emotion_interval) == 0:
