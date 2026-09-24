@@ -15,12 +15,33 @@ shows the interpretation (aroused / neutral / calmer, stressing / steady / relax
 ### Wiring
 
 | Pulse oximeter | QT Py M0 |
+Install the dashboard dependencies in the active Python environment:
+
+```bash
+cd sensor-hardware
+uv pip install -r requirements.txt
+```
+
+Then run the live dashboard from this directory:
+
 |---|---|
-| 3V3 | 3V |
-| GND | GND |
-| SDA | SDA (A4) |
-| SCL | SCL (A5) |
+python scripts/dashboard.py              # live graphs + interpretation
+python scripts/dashboard.py --demo       # simulated data, no board needed
+python scripts/dashboard.py --log s.csv  # also save every sample to CSV
+python scripts/read_sensor.py            # plain terminal output
 | RST | A2 |
+
+To select a specific serial device, pass its port explicitly:
+
+```bash
+python scripts/dashboard.py --port /dev/cu.usbmodemXXXX
+```
+
+On macOS, list likely QT Py ports with:
+
+```bash
+ls /dev/cu.usb*
+```
 | MFIO | A3 |
 
 A Qwiic/STEMMA QT cable covers 3V3, GND, SDA and SCL. RST and MFIO need two
