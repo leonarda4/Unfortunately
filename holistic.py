@@ -5,6 +5,7 @@ import queue
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 
 import cv2
 import mediapipe as mp
@@ -19,6 +20,20 @@ mp_holistic = mp.solutions.holistic
 mp_drawing = mp.solutions.drawing_utils
 mp_styles = mp.solutions.drawing_styles
 QUESTION = "What is something that made you feel proud recently?"
+EMOTION_INTERVAL = 15
+BLINK_THRESHOLD = 0.21
+BLINK_MIN_FRAMES = 2
+
+
+@dataclass
+class VisualMetrics:
+    emotion: str = "warming up"
+    emotion_confidence: float = 0.0
+    emotion_error: str = ""
+    looking_at_camera: bool = False
+    gaze_available: bool = False
+    blink_count: int = 0
+    eyes_closed_frames: int = 0
 
 
 def speak(message):
@@ -40,7 +55,101 @@ def right_hand_is_raised(results):
     return wrist.y < shoulder.y - 0.05
 
 
-def print_response_metrics(dashboard):
+def eye_aspect_ratio(landmarks, horizontal_left, horizontal_right, vertical_top, vertical_bottom):
+    """Estimate eye openness from normalized face landmark coordinates."""
+    horizontal = np.linalg.norm(
+        np.array([landmarks[horizontal_left].x, landmarks[horizontal_left].y])
+        - np.array([landmarks[horizontal_right].x, landmarks[horizontal_right].y])
+    )
+    vertical = np.linalg.norm(
+        np.array([landmarks[vertical_top].x, landmarks[vertical_top].y])
+        - np.array([landmarks[vertical_bottom].x, landmarks[vertical_bottom].y])
+    )
+    return vertical / max(horizontal, 1e-6)
+
+
+def update_blink_count(face_landmarks, metrics):
+    """Count a blink after the eyes remain closed briefly and reopen."""
+    left_ear = eye_aspect_ratio(face_landmarks, 33, 133, 159, 145)
+    right_ear = eye_aspect_ratio(face_landmarks, 362, 263, 386, 374)
+    eyes_closed = (left_ear + right_ear) / 2.0 < BLINK_THRESHOLD
+    if eyes_closed:
+        metrics.eyes_closed_frames += 1
+    elif metrics.eyes_closed_frames >= BLINK_MIN_FRAMES:
+        metrics.blink_count += 1
+        metrics.eyes_closed_frames = 0
+    else:
+        metrics.eyes_closed_frames = 0
+
+
+def gaze_is_camera_facing(face_landmarks):
+    """Use iris position within each eye as a coarse camera-gaze proxy."""
+    if len(face_landmarks) < 478:
+        return False, False
+
+    eye_ranges = ((33, 133, 468), (362, 263, 473))
+    horizontal_positions = []
+    vertical_positions = []
+    for left_corner, right_corner, iris_index in eye_ranges:
+        corner_left = face_landmarks[left_corner]
+        corner_right = face_landmarks[right_corner]
+        iris = face_landmarks[iris_index]
+        horizontal_span = corner_right.x - corner_left.x
+        if abs(horizontal_span) < 1e-6:
+            return False, False
+        horizontal_positions.append((iris.x - corner_left.x) / horizontal_span)
+        vertical_positions.append(iris.y - (corner_left.y + corner_right.y) / 2.0)
+
+    centered_horizontally = all(0.25 <= position <= 0.75 for position in horizontal_positions)
+    centered_vertically = all(abs(position) <= 0.08 for position in vertical_positions)
+    return centered_horizontally and centered_vertically, True
+
+
+def face_crop(frame, face_landmarks):
+    """Return a padded face crop for the emotion model."""
+    height, width = frame.shape[:2]
+    x_values = [landmark.x for landmark in face_landmarks]
+    y_values = [landmark.y for landmark in face_landmarks]
+    left = max(0, int(min(x_values) * width) - 20)
+    top = max(0, int(min(y_values) * height) - 20)
+    right = min(width, int(max(x_values) * width) + 20)
+    bottom = min(height, int(max(y_values) * height) + 20)
+    crop = frame[top:bottom, left:right]
+    return crop if crop.size else None
+
+
+def emotion_worker(emotion_queue, metrics, stop_event):
+    """Run DeepFace on the newest crop without blocking landmark rendering."""
+    try:
+        from deepface import DeepFace
+    except ImportError as error:
+        metrics.emotion_error = f"DeepFace unavailable: {error}"
+        return
+
+    while not stop_event.is_set():
+        try:
+            crop = emotion_queue.get(timeout=0.2)
+        except queue.Empty:
+            continue
+        try:
+            result = DeepFace.analyze(
+                crop,
+                actions=["emotion"],
+                enforce_detection=False,
+                detector_backend="skip",
+                silent=True,
+            )
+            result = result[0] if isinstance(result, list) else result
+            emotions = result.get("emotion", {})
+            dominant = result.get("dominant_emotion", "unknown")
+            metrics.emotion = str(dominant)
+            metrics.emotion_confidence = float(emotions.get(dominant, 0.0))
+            metrics.emotion_error = ""
+        except Exception as error:
+            metrics.emotion_error = f"Emotion error: {error}"
+
+
+def print_response_metrics(dashboard, visual_metrics):
     """Print the completed response in a terminal-friendly format."""
     print("\n--- Voice response ---")
     print(f"Transcription: {dashboard.transcript}")
@@ -56,6 +165,9 @@ def print_response_metrics(dashboard):
     print(f"Filled pauses: {dashboard.filled_pauses}")
     print(f"Mean / peak level: {dashboard.mean_db:.1f} / {dashboard.peak_db:.1f} dBFS")
     print(f"Speech ratio: {dashboard.speech_ratio * 100:.1f}%")
+    print(f"Dominant emotion: {visual_metrics.emotion} ({visual_metrics.emotion_confidence:.1f}%)")
+    print(f"Blink count: {visual_metrics.blink_count}")
+    print(f"Looking at camera: {'yes' if visual_metrics.looking_at_camera else 'no'}")
     print("----------------------\n", flush=True)
 
 
@@ -93,6 +205,7 @@ def main():
     parser = argparse.ArgumentParser(description="Preview MediaPipe Holistic landmarks.")
     parser.add_argument("--camera", type=int, default=0, help="Camera index (default: 0).")
     parser.add_argument("--model", default="tiny.en", help="Whisper model used after the response, e.g. base.en.")
+    parser.add_argument("--emotion-interval", type=int, default=EMOTION_INTERVAL, help="Analyze every N camera frames.")
     args = parser.parse_args()
 
     camera = cv2.VideoCapture(args.camera, cv2.CAP_AVFOUNDATION)
@@ -101,7 +214,16 @@ def main():
 
     audio_queue = queue.Queue()
     dashboard = Dashboard(prompt=QUESTION)
+    visual_metrics = VisualMetrics()
     audio_stream = None
+    emotion_queue = queue.Queue(maxsize=1)
+    emotion_stop = threading.Event()
+    emotion_thread = threading.Thread(
+        target=emotion_worker,
+        args=(emotion_queue, visual_metrics, emotion_stop),
+        daemon=True,
+    )
+    emotion_thread.start()
 
     def audio_callback(indata, frames, callback_time, status):
         if status:
@@ -137,6 +259,7 @@ def main():
             speech_flags = []
             noise_samples = []
             transcription_thread = None
+            frame_number = 0
 
             def ask_question():
                 nonlocal prompt_finished
@@ -176,7 +299,7 @@ def main():
                     if dashboard.error:
                         print(dashboard.error, flush=True)
                     else:
-                        print_response_metrics(dashboard)
+                        print_response_metrics(dashboard, visual_metrics)
 
                 transcription_thread = threading.Thread(target=transcribe_and_print, daemon=True)
                 transcription_thread.start()
@@ -191,6 +314,16 @@ def main():
                 results = holistic.process(rgb_frame)
                 rgb_frame.flags.writeable = True
                 draw_landmarks(frame, results)
+                frame_number += 1
+
+                if results.face_landmarks:
+                    face_landmarks = results.face_landmarks[0]
+                    update_blink_count(face_landmarks, visual_metrics)
+                    visual_metrics.looking_at_camera, visual_metrics.gaze_available = gaze_is_camera_facing(face_landmarks)
+                    if completion_announced and frame_number % max(1, args.emotion_interval) == 0:
+                        crop = face_crop(frame, face_landmarks)
+                        if crop is not None and emotion_queue.empty():
+                            emotion_queue.put_nowait(crop.copy())
 
                 if not hand_detected and right_hand_is_raised(results):
                     hand_detected = True
@@ -248,6 +381,15 @@ def main():
                     status_color,
                     2,
                 )
+                gaze_color = (0, 220, 0) if visual_metrics.looking_at_camera else (0, 0, 255)
+                gaze_label = "Gaze: camera" if visual_metrics.looking_at_camera else "Gaze: away"
+                if not visual_metrics.gaze_available:
+                    gaze_label = "Gaze: unavailable"
+                    gaze_color = (150, 150, 150)
+                cv2.circle(frame, (frame.shape[1] - 45, 45), 12, gaze_color, -1)
+                cv2.putText(frame, gaze_label, (frame.shape[1] - 230, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.55, gaze_color, 2)
+                cv2.putText(frame, f"Emotion: {visual_metrics.emotion} ({visual_metrics.emotion_confidence:.0f}%)", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 220, 100), 2)
+                cv2.putText(frame, f"Blinks: {visual_metrics.blink_count}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 220, 100), 2)
                 cv2.imshow("Holistic Landmarker", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -259,6 +401,7 @@ def main():
                     listening_started = False
                     recording, levels, speech_flags = [], [], []
     finally:
+        emotion_stop.set()
         if audio_stream is not None:
             audio_stream.stop()
             audio_stream.close()

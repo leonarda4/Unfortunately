@@ -4,3 +4,6 @@ protobuf==4.25.9
 sounddevice
 soundfile
 faster-whisper
+deepface
+tf_keras
+urllib3<2

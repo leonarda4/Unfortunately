@@ -51,7 +51,10 @@ Press the space bar to finish the response. The Whisper transcription and
 speech metrics are printed in the terminal. This requires the voice packages
 listed in `requirements-holistic.txt`; the first response downloads the chosen
 Whisper model. Use `python holistic.py --model base.en` for more accurate
-transcription.
+transcription. During the come-closer phase, DeepFace displays the dominant
+emotion, a green/red dot shows the gaze proxy (camera/away), and the preview
+counts blinks. These are approximate signals, not clinical measurements. Use
+`--emotion-interval 30` to reduce emotion-analysis frequency on a slower Mac.
 
 ### Voice interaction prototype
 
