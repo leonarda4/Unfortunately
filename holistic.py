@@ -1,6 +1,7 @@
 """Live MediaPipe Holistic face, pose, and hand landmark preview."""
 
 import argparse
+import subprocess
 
 import cv2
 import mediapipe as mp
@@ -9,6 +10,25 @@ import mediapipe as mp
 mp_holistic = mp.solutions.holistic
 mp_drawing = mp.solutions.drawing_utils
 mp_styles = mp.solutions.drawing_styles
+
+
+def speak(message):
+    """Speak without blocking the camera preview on macOS."""
+    subprocess.Popen(
+        ["say", message],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def right_hand_is_raised(results):
+    """Return true when the user's semantic right wrist is above the shoulder."""
+    if not results.right_hand_landmarks or not results.pose_landmarks:
+        return False
+
+    wrist = results.right_hand_landmarks[0].landmark[mp_holistic.HandLandmark.WRIST]
+    shoulder = results.pose_landmarks.landmark[mp_holistic.PoseLandmark.RIGHT_SHOULDER]
+    return wrist.y < shoulder.y - 0.05
 
 
 def draw_landmarks(frame, results):
@@ -60,6 +80,10 @@ def main():
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         ) as holistic:
+            speak("Please lift your right hand")
+            hand_detected = False
+            completion_announced = False
+
             while True:
                 success, frame = camera.read()
                 if not success:
@@ -71,13 +95,26 @@ def main():
                 rgb_frame.flags.writeable = True
                 draw_landmarks(frame, results)
 
+                if not hand_detected and right_hand_is_raised(results):
+                    hand_detected = True
+                    if not completion_announced:
+                        speak("Scanning complete, come closer")
+                        completion_announced = True
+
+                if completion_announced:
+                    status = "Scanning complete - come closer"
+                    status_color = (80, 240, 120)
+                else:
+                    status = "Please lift your right hand"
+                    status_color = (0, 220, 255)
+
                 cv2.putText(
                     frame,
-                    "MediaPipe Holistic | press q to quit",
+                    f"{status} | press q to quit",
                     (20, 35),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
-                    (255, 255, 255),
+                    status_color,
                     2,
                 )
                 cv2.imshow("Holistic Landmarker", frame)

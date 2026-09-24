@@ -44,6 +44,11 @@ python holistic.py
 
 Press `q` to quit. Use `python holistic.py --camera 1` for another camera.
 
+The Holistic preview now asks the user to lift their right hand. When the
+semantic right wrist is detected above the right shoulder, it announces
+“Scanning complete, come closer” and keeps that status visible in the preview.
+Speech uses the macOS `say` command.
+
 ### Voice interaction prototype
 
 The `voice_interaction.py` prototype speaks a prompt with macOS text-to-speech,
