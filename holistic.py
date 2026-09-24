@@ -26,7 +26,7 @@ def right_hand_is_raised(results):
     if not results.right_hand_landmarks or not results.pose_landmarks:
         return False
 
-    wrist = results.right_hand_landmarks[0].landmark[mp_holistic.HandLandmark.WRIST]
+    wrist = results.right_hand_landmarks.landmark[mp_holistic.HandLandmark.WRIST]
     shoulder = results.pose_landmarks.landmark[mp_holistic.PoseLandmark.RIGHT_SHOULDER]
     return wrist.y < shoulder.y - 0.05
 
