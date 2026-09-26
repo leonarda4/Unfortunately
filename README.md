@@ -2,10 +2,10 @@
 
 A camera-based interaction prototype for voice and nonverbal signals.
 
-The current starting point is the MediaPipe Holistic interaction. It asks the
-user to lift their right hand, says "Scanning complete, come closer", asks a
-question, listens for a spoken response, and prints speech metrics and a
-Whisper transcription in the terminal.
+The MediaPipe Holistic interaction greets a person when they enter the camera
+frame, gives scan and positioning prompts, checks face framing and sensor
+contact, then asks a randomized sequence of screening questions. Each answer is
+transcribed with Whisper and its speech metrics are printed in the terminal.
 
 During the interaction it also shows:
 
@@ -15,7 +15,10 @@ During the interaction it also shows:
 - Background DeepFace emotion analysis during the come-closer phase
 
 These visual signals are approximate measurements and are not clinical
-assessments.
+assessments. This prototype asks sensitive employment, family, and health
+questions and captures voice, face, and sensor signals. Do not use its output
+to make employment decisions; obtain informed consent and review applicable
+privacy and employment requirements before any use.
 
 ## Setup
 
@@ -38,11 +41,34 @@ If a QT Py sensor board is connected, its latest heart rate, SpO2, GSR change,
 level, trend, and spike count appear during the come-closer phase and are
 included in the terminal summary. Use `--sensor-port /dev/cu.usbmodemXXXX` to
 select a port, or `--no-sensors` to disable serial readings.
+After sensor contact starts its baseline, the app says “Calibration in
+progress. Please wait.” and plays a synthesized elevator-style instrumental
+loop until the sensor enters its measuring phase. If the sensor disconnects,
+the music stops and the screening continues without sensor calibration.
+Answers end after one second of silence by default; use `--silence` and
+`--max-seconds` to adjust answer capture. The women-specific audio prompt looks
+for optional clips named `laugh*.wav`, `cry*.wav`, or `speak*.wav` in `sounds/`;
+set `--baby-sounds-dir` to use another directory. If no matching clip exists,
+the spoken prompt still runs and the missing clip is reported in the terminal.
+The pose scan waits until both hips are visible, checks each lift/turn before
+continuing, and repeats an uncompleted pose prompt every four seconds. If an
+answer never starts, the app gives a reminder after five seconds, a last-chance
+prompt after another ten seconds, and ends the interview after another fifteen
+seconds. Adjust those waits with `--answer-nudge-after`,
+`--answer-warning-after`, and `--answer-final-after`.
+Each run writes a local JSONL log under `logs/` by default; use `--log-dir` to
+choose another directory. It records each question, transcript, response and
+signal metrics, and calibration/interview events. Raw microphone audio is not
+logged. Treat these files as sensitive personal data and only retain them with
+appropriate consent and safeguards.
 
 ## Controls
 
-- Raise the user's right hand to begin the interaction.
-- Press Space to finish the spoken response.
+- Enter the camera frame to begin the interaction.
+- Answer each spoken question; one second of silence advances to the next.
+- Follow each lift/turn prompt; the next scan prompt waits for the pose check.
+- Press Space to finish the current answer immediately.
+- Session records are written to `logs/`.
 - Press `q` to quit.
 
 ## Credits
