@@ -31,6 +31,7 @@ TREND_PCT_PER_MIN = 10.0
 METER_RANGE_PCT = 30.0
 HR_MIN_CONFIDENCE = 90
 GSR_CONTACT_MARGIN = 30
+HAND_GONE_S = 10.0
 
 # Colours
 SURFACE   = "#fcfcfb"
@@ -85,15 +86,19 @@ def read_serial(port, messages):
 def simulate():
     """Endless fake sessions shaped like the firmware's output."""
     t = 0.0
+    candidate = 0
     while True:
         for _ in range(30):  # a few seconds without a hand
             t += 0.1
-            yield {"t": int(t * 1000), "phase": "idle", "hand": 0, "session_s": None, "finger": 0,
+            yield {"t": int(t * 1000), "phase": "idle", "candidate": candidate, "hand": 0, "away_s": None,
+                   "session_s": None, "finger": 0,
                    "hr": 0, "hr_conf": 0, "spo2": 0, "gsr_raw": 700, "gsr_open": 700.0, "gsr": None,
                    "gsr_base": None, "gsr_change": None, "gsr_trend": None, "gsr_phasic": None,
                    "hr_base": None, "hr_change": None, "spikes": 0, "spike": 0, "level": None, "trend": None}
 
-        yield {"event": "session_start", "t": int(t * 1000)}
+        candidate += 1
+        yield {"event": "session_start", "t": int(t * 1000), "candidate": candidate}
+        yield {"event": "baseline_start", "t": int(t * 1000)}
         g0, hr0 = random.uniform(160, 240), random.uniform(64, 76)
         base = hr_base = None
         history = collections.deque(maxlen=100)
@@ -118,8 +123,8 @@ def simulate():
                 base, hr_base = g0, hr0
                 yield {"event": "baseline_done", "t": int(t * 1000), "gsr_base": base, "hr_base": hr_base}
 
-            msg = {"t": int(t * 1000), "phase": "measuring" if base else "baseline", "hand": 1,
-                   "session_s": s, "finger": 3, "hr": int(hr), "hr_conf": conf, "spo2": 98 if random.random() < 0.9 else 97,
+            msg = {"t": int(t * 1000), "phase": "measuring" if base else "baseline", "candidate": candidate,
+                   "hand": 1, "away_s": None, "session_s": s, "finger": 3, "hr": int(hr), "hr_conf": conf, "spo2": 98 if random.random() < 0.9 else 97,
                    "gsr_raw": int(700 - tonic), "gsr_open": 700.0, "gsr": tonic, "gsr_base": base,
                    "gsr_change": None, "gsr_trend": None, "gsr_phasic": None, "hr_base": hr_base,
                    "hr_change": None, "spikes": spikes, "spike": int(s - last_spike < 3),
@@ -136,7 +141,7 @@ def simulate():
                                     else "relaxing" if trend < -TREND_PCT_PER_MIN else "steady")
             yield msg
 
-        yield {"event": "session_end", "t": int(t * 1000), "duration_s": 90.0, "gsr_base": base,
+        yield {"event": "session_end", "t": int(t * 1000), "candidate": candidate, "duration_s": 90.0, "gsr_base": base,
                "gsr_change": msg["gsr_change"], "hr_base": hr_base, "hr_change": msg["hr_change"],
                "spikes": spikes}
 
@@ -186,6 +191,7 @@ class Dashboard:
         self.x, self.hr, self.spo2, self.gsr = [], [], [], []
         self.spike_x, self.spike_y = [], []
         self.spikes_seen = 0
+        self.baseline_start = 0
         self.baseline_end = None
         self.gsr_base = self.hr_base = None
 
@@ -286,6 +292,10 @@ class Dashboard:
         if event == "session_start":
             self.reset_session()
             self.summary = None
+        elif event == "baseline_start":  # also sent when the baseline restarts within a session
+            self.baseline_start = self.x[-1] if self.x else 0
+            self.baseline_end = None
+            self.gsr_base = self.hr_base = None
         elif event == "baseline_done":
             self.baseline_end = self.x[-1] if self.x else 0
             self.gsr_base, self.hr_base = msg.get("gsr_base"), msg.get("hr_base")
@@ -339,8 +349,9 @@ class Dashboard:
                 ax.set_ylim(*empty)
 
         # Grey band while the baseline is being measured
-        baseline_width = self.baseline_end if self.baseline_end is not None else end
+        baseline_width = (self.baseline_end if self.baseline_end is not None else end) - self.baseline_start
         for span in self.baseline_spans:
+            span.set_x(self.baseline_start)
             span.set_width(baseline_width if self.x else 0)
         self.baseline_label.set_text("baseline window" if self.x else "")
 
@@ -359,10 +370,14 @@ class Dashboard:
             self.header.set_text(f"Error: {self.error}")
         elif self.latest is None and self.unreadable > 20:
             self.header.set_text("Receiving data, but not JSON \u2013 upload the new firmware")
+        elif phase in ("baseline", "measuring") and msg.get("away_s") is not None:
+            ends_in = max(0, HAND_GONE_S - msg["away_s"])
+            self.header.set_text(f"Candidate #{msg['candidate']:04d} · hand lifted · session ends in {ends_in:.0f} s")
         elif phase == "measuring":
-            self.header.set_text(f"Measuring · {msg['session_s']:.0f} s")
+            self.header.set_text(f"Candidate #{msg['candidate']:04d} · measuring · {msg['session_s']:.0f} s")
         elif phase == "baseline":
-            self.header.set_text(f"Measuring baseline · keep still · {msg['session_s']:.0f} s")
+            self.header.set_text(f"Candidate #{msg['candidate']:04d} · measuring baseline · keep still · "
+                                 f"{msg['session_s']:.0f} s")
         elif phase == "idle":
             self.header.set_text("Waiting for a hand on both sensors" + (" · showing last session" if self.x else ""))
         else:
@@ -449,7 +464,7 @@ class Dashboard:
         s = self.summary
         if not s:
             return None
-        parts = [f"Last session: {s['duration_s']:.0f} s"]
+        parts = [f"Last session: #{s['candidate']:04d}, {s['duration_s']:.0f} s"]
         if s.get("gsr_change") is not None:
             parts.append(f"GSR {s['gsr_change']:+.0f}%")
         if s.get("hr_change") is not None:

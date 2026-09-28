@@ -17,7 +17,7 @@ import threading
 import serial
 
 FIELDS = [
-    "t", "phase", "hand", "session_s", "finger", "hr", "hr_conf", "spo2",
+    "t", "phase", "candidate", "hand", "away_s", "session_s", "finger", "hr", "hr_conf", "spo2",
     "gsr_raw", "gsr_open", "gsr", "gsr_base", "gsr_change", "gsr_trend",
     "gsr_phasic", "hr_base", "hr_change", "spikes", "spike", "level", "trend",
 ]
@@ -70,7 +70,9 @@ def main():
             if writer:
                 writer.writerow(msg)
 
-            if msg["phase"] == "measuring":
+            if msg["phase"] != "idle" and msg.get("away_s") is not None:
+                print(f"#{msg['candidate']:04d} hand lifted {msg['away_s']:.0f} s - session ends after 10 s")
+            elif msg["phase"] == "measuring":
                 print(
                     f"HR {msg['hr']:3d} ({fmt(msg['hr_change'], ' bpm')})  "
                     f"SpO2 {msg['spo2']:3d}%  "
