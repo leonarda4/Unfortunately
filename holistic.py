@@ -2,6 +2,7 @@
 
 import argparse
 from datetime import datetime, timezone
+from functools import lru_cache
 import queue
 import random
 import subprocess
@@ -55,9 +56,11 @@ SCAN_ACTIONS = (
 )
 TURN_LEFT_PROMPT = "Turn to the left."
 TURN_AROUND_PROMPT = "Turn around."
+
 POSITION_PROMPT = "Please come forward and place your right hand on the sensor."
 HEAD_PROMPT = "Please lower your head so you see yourself in the mirror."
 HAND_PROMPT = "Hand is not detected. Please place three fingers on the sensors."
+
 NO_ANSWER_PROMPTS = (
     "Please answer the question.",
     "Are you going to say something?",
@@ -67,9 +70,24 @@ LAST_CHANCE_PROMPTS = (
     "You are not going to answer, huh? This is your last chance.",
     "Are you ignoring me?",
 )
-END_INTERVIEW_PROMPT = (
-    "Unfortunately, you need to be able to speak for this role. We will be moving forward with other candidates."
+
+END_INTERVIEW_PROMPT_MUTE = (
+    "Unfortunately, you need to be able to speak for this role. We will be moving forward with other candidates.",
+    "Unfortunately, we think you are not taking this interview seriously. We will be moving forward with other candidates.",
 )
+
+END_INTERVIEW_PROMPT_FAIL = (
+    "Unfortunately, we will be moving forward with other candidates.",
+    "Unfortunately, you do not fit into our company culture.",
+    "Unfortunately, due to large number of applicants, we will not be able to consider your application further.",
+    "Unfortunately, we cannot proceed with your application. Thank you for your time.",
+    "Unfortunately, you blink too much. We will be moving forward with other candidates.",
+)
+
+END_INTERVIEW_PROMPT_PASS = (
+    "Congratulations! You have passed the screening. There are 5 more interviews to complete, please take the receipt and proceed to the next station.",
+)
+
 POSE_RETRY_SECONDS = 4.0
 POSE_STABLE_FRAMES = 3
 
@@ -90,8 +108,8 @@ COGNITIVE_QUESTIONS = (
     "Name 3 objects that are commonly found in an office.",
     "Repeat the following sequence: 7, 2, 9, 4, 5.",
     "Why did the chicken cross the road?",
-    "A pen and a paper cost €1.10 in total. The pen costs $1.00 more than the paper. How much does the paper cost?",
 )
+
 WORKPLACE_QUESTIONS = (
     "Do you prefer working alone or as part of a team?",
     "What do you do when instructions are unclear?",
@@ -113,6 +131,7 @@ EMOTIONAL_QUESTIONS = (
     "Have you changed any answer to appear more employable?",
     "Would you lie to obtain this position?",
 )
+
 HEALTH_QUESTIONS = (
     "Did you eat breakfast today?",
     "How many hours did you sleep last night?",
@@ -557,60 +576,74 @@ def draw_landmarks(frame, results):
     def point(landmark):
         return round(landmark.x * width), round(landmark.y * height)
 
-    def draw_connections(landmarks, connections, color, thickness, radius):
+    def draw_connections(landmarks, connections, connection_color, thickness, landmark_color=None, radius=0):
         if not landmarks:
             return
         for connection in connections:
             start = connection.start
             end = connection.end
             if start < len(landmarks) and end < len(landmarks):
-                cv2.line(frame, point(landmarks[start]), point(landmarks[end]), color, thickness, cv2.LINE_AA)
-        for landmark in landmarks:
-            cv2.circle(frame, point(landmark), radius, color, -1, cv2.LINE_AA)
+                cv2.line(
+                    frame,
+                    point(landmarks[start]),
+                    point(landmarks[end]),
+                    connection_color,
+                    thickness,
+                    cv2.LINE_AA,
+                )
+        if landmark_color is not None:
+            for landmark in landmarks:
+                cv2.circle(frame, point(landmark), radius, landmark_color, -1, cv2.LINE_AA)
 
     face_landmarks = landmark_group(results.face_landmarks)
     draw_connections(
         face_landmarks,
         FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION,
-        (70, 245, 130),
-        1,
+        (128, 128, 128),
         1,
     )
     draw_connections(
         face_landmarks,
         FaceLandmarksConnections.FACE_LANDMARKS_CONTOURS,
-        (245, 255, 255),
-        2,
+        (255, 255, 255),
         1,
     )
     draw_connections(
         landmark_group(results.pose_landmarks),
         PoseLandmarksConnections.POSE_LANDMARKS,
-        (40, 205, 255),
-        3,
-        3,
+        (0, 255, 0),
+        2,
+        (0, 0, 255),
+        2,
     )
     draw_connections(
         landmark_group(results.left_hand_landmarks),
         HandLandmarksConnections.HAND_CONNECTIONS,
-        (255, 190, 55),
+        (0, 255, 0),
         2,
-        3,
+        (0, 0, 255),
+        2,
     )
     draw_connections(
         landmark_group(results.right_hand_landmarks),
         HandLandmarksConnections.HAND_CONNECTIONS,
-        (255, 235, 80),
+        (0, 255, 0),
         2,
-        3,
+        (0, 0, 255),
+        2,
     )
 
 
-def load_helvetica_fonts():
+@lru_cache(maxsize=32)
+def load_font(size):
     font_path = next((path for path in FONT_PATHS if path.is_file()), None)
     if font_path is None:
-        return {size: ImageFont.load_default() for size in (13, 14, 17)}
-    return {size: ImageFont.truetype(str(font_path), size) for size in (13, 14, 17)}
+        return ImageFont.load_default()
+    return ImageFont.truetype(str(font_path), size)
+
+
+def load_helvetica_fonts(scale=1.0):
+    return {size: load_font(max(8, round(size * scale))) for size in (13, 14, 17)}
 
 
 def numeric_sample(value):
@@ -635,7 +668,107 @@ def graph_sample_values(sensor_metrics):
     }
 
 
-def draw_live_dashboard(frame, status, gaze_label, visual_metrics, sensor_metrics, graph_history, fonts):
+def draw_wide_dashboard(frame, status, gaze_label, visual_metrics, sensor_metrics, graph_history, width, height):
+    scale = min(2.5, max(0.8, min(width / 1280, height / 800)))
+    fonts = load_helvetica_fonts(scale)
+    header_height = round(82 * scale)
+    left_width = round(width * 0.64)
+    body_height = height - header_height
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+
+    frame_height, frame_width = frame.shape[:2]
+    fit_scale = min(left_width / frame_width, body_height / frame_height)
+    resized = cv2.resize(frame, (round(frame_width * fit_scale), round(frame_height * fit_scale)))
+    frame_left = (left_width - resized.shape[1]) // 2
+    frame_top = header_height + (body_height - resized.shape[0]) // 2
+    canvas[frame_top:frame_top + resized.shape[0], frame_left:frame_left + resized.shape[1]] = resized
+    cv2.line(canvas, (left_width, 0), (left_width, height), (55, 55, 55), max(1, round(scale)))
+
+    series = (
+        ("hr", "HEART RATE", "bpm", (70, 210, 255), 40, 140),
+        ("spo2", "BLOOD OXYGEN / SPO2", "%", (255, 190, 70), 85, 100),
+        ("gsr", "SKIN CONDUCTANCE / GSR", "level", (90, 245, 155), None, None),
+    )
+    graph_labels = []
+    panel_height = body_height / len(series)
+    for index, (key, title, unit, color, low, high) in enumerate(series):
+        top = header_height + round(index * panel_height)
+        bottom = header_height + round((index + 1) * panel_height)
+        if index:
+            cv2.line(canvas, (left_width, top), (width, top), (55, 55, 55), max(1, round(scale)))
+        plot_left = left_width + round(52 * scale)
+        plot_right = width - round(24 * scale)
+        plot_top = top + round(62 * scale)
+        plot_bottom = bottom - round(34 * scale)
+
+        values = list(graph_history[key])
+        valid_values = [value for value in values if value is not None]
+        if low is None and valid_values:
+            low = min(valid_values) - 5
+            high = max(valid_values) + 5
+            if high - low < 10:
+                midpoint = (high + low) / 2
+                low, high = midpoint - 5, midpoint + 5
+        elif low is None:
+            low, high = 0, 100
+
+        for grid_index in range(4):
+            y = plot_top + round(grid_index * (plot_bottom - plot_top) / 3)
+            cv2.line(canvas, (plot_left, y), (plot_right, y), (45, 45, 45), 1, cv2.LINE_AA)
+
+        previous = None
+        denominator = max(1, len(values) - 1)
+        for value_index, value in enumerate(values):
+            if value is None:
+                previous = None
+                continue
+            x = plot_left + round(value_index * (plot_right - plot_left) / denominator)
+            normalized = min(1.0, max(0.0, (value - low) / (high - low)))
+            y = plot_bottom - round(normalized * (plot_bottom - plot_top))
+            current = (x, y)
+            if previous is not None:
+                cv2.line(canvas, previous, current, color, max(1, round(2 * scale)), cv2.LINE_AA)
+            previous = current
+        if previous is not None:
+            cv2.circle(canvas, previous, max(3, round(4 * scale)), color, -1, cv2.LINE_AA)
+
+        latest = valid_values[-1] if valid_values else None
+        latest_text = "--" if latest is None else f"{latest:.0f} {unit}"
+        graph_labels.append((left_width, width, top, title, latest_text, high, low, plot_top, plot_bottom))
+
+    image = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(image)
+    padding = round(18 * scale)
+    draw.text((padding, round(10 * scale)), status, font=fonts[17], fill=(255, 255, 255))
+    gaze_bounds = draw.textbbox((0, 0), gaze_label, font=fonts[14])
+    draw.text((left_width - padding - (gaze_bounds[2] - gaze_bounds[0]), round(12 * scale)), gaze_label,
+              font=fonts[14], fill=(255, 255, 255))
+    draw.text(
+        (padding, round(37 * scale)),
+        f"Emotion: {visual_metrics.emotion} ({visual_metrics.emotion_confidence:.0f}%)  |  Blinks: {visual_metrics.blink_count}",
+        font=fonts[14],
+        fill=(255, 255, 255),
+    )
+    sensor_text = (
+        f"HR {sensor_metrics.hr or '--'} bpm  |  SpO2 {sensor_metrics.spo2 or '--'}%  |  "
+        f"GSR {sensor_metrics.gsr_change or '--'}%  |  {sensor_metrics.level}/{sensor_metrics.trend}"
+        if sensor_metrics.connected else "Sensors offline"
+    )
+    draw.text((padding, round(59 * scale)), sensor_text, font=fonts[13], fill=(255, 255, 255))
+    for left, right, top, title, latest_text, high, low, plot_top, plot_bottom in graph_labels:
+        draw.text((left + padding, top + round(15 * scale)), title, font=fonts[14], fill=(255, 255, 255))
+        value_bounds = draw.textbbox((0, 0), latest_text, font=fonts[13])
+        draw.text((right - padding - (value_bounds[2] - value_bounds[0]), top + round(16 * scale)),
+                  latest_text, font=fonts[13], fill=(255, 255, 255))
+        draw.text((left + round(8 * scale), plot_top - round(7 * scale)), f"{high:.0f}",
+                  font=fonts[13], fill=(255, 255, 255))
+        draw.text((left + round(8 * scale), plot_bottom - round(13 * scale)), f"{low:.0f}",
+                  font=fonts[13], fill=(255, 255, 255))
+    return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+
+
+def draw_live_dashboard(frame, status, gaze_label, visual_metrics, sensor_metrics, graph_history, fonts,
+                        display_size=None):
     height, width = frame.shape[:2]
     header_height = 82
     graph_height = 238
@@ -721,7 +854,21 @@ def draw_live_dashboard(frame, status, gaze_label, visual_metrics, sensor_metric
         if sensor_metrics.connected else "Sensors offline"
     )
     draw.text((18, 58), sensor_text, font=fonts[13], fill=(255, 255, 255))
-    return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+    dashboard = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+    if display_size is None:
+        return dashboard
+
+    display_width, display_height = display_size
+    scale = min(display_width / dashboard.shape[1], display_height / dashboard.shape[0])
+    content_width = max(1, round(dashboard.shape[1] * scale))
+    content_height = max(1, round(dashboard.shape[0] * scale))
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+    content = cv2.resize(dashboard, (content_width, content_height), interpolation=interpolation)
+    canvas = np.zeros((display_height, display_width, 3), dtype=np.uint8)
+    left = (display_width - content_width) // 2
+    top = (display_height - content_height) // 2
+    canvas[top:top + content_height, left:left + content_width] = content
+    return canvas
 
 
 def create_landmarker(model_path):
@@ -774,6 +921,8 @@ def main():
     camera = cv2.VideoCapture(args.camera, cv2.CAP_AVFOUNDATION)
     if not camera.isOpened():
         raise SystemExit("Unable to open the camera. Enable camera access for Terminal or VS Code.")
+    window_name = "Holistic Landmarker"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     audio_queue = queue.Queue()
     dashboard = Dashboard()
@@ -857,6 +1006,7 @@ def main():
             noise_samples = []
             transcription_thread = None
             frame_number = 0
+            display_size = None
 
             def start_instruction(text, next_action):
                 workflow_stage[0] = "speaking_instruction"
@@ -1101,6 +1251,7 @@ def main():
                         "event": "interview_ended_no_response",
                         "category": current_question["category"] if current_question else None,
                         "question": current_question["text"] if current_question else None,
+                        "ending_prompt": detail,
                     })
                     workflow_stage[0] = "ended"
                     question_queue.clear()
@@ -1263,13 +1414,14 @@ def main():
                         dashboard.state = "Ending interview"
 
                         def end_for_no_response():
+                            ending_prompt = random.choice(END_INTERVIEW_PROMPT_MUTE)
                             subprocess.run(
-                                ["say", END_INTERVIEW_PROMPT],
+                                ["say", ending_prompt],
                                 check=False,
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL,
                             )
-                            workflow_events.put(("interview_ended", None))
+                            workflow_events.put(("interview_ended", ending_prompt))
 
                         threading.Thread(target=end_for_no_response, daemon=True).start()
 
@@ -1318,9 +1470,15 @@ def main():
                     sensor_metrics,
                     graph_history,
                     ui_fonts,
+                    display_size,
                 )
-                cv2.imshow("Holistic Landmarker", display_frame)
+                cv2.imshow(window_name, display_frame)
                 key = cv2.waitKey(1) & 0xFF
+                try:
+                    _, _, window_width, window_height = cv2.getWindowImageRect(window_name)
+                    display_size = (window_width, window_height) if window_width > 0 and window_height > 0 else None
+                except cv2.error:
+                    display_size = None
                 if key == ord("q"):
                     break
                 if key == 32 and workflow_stage[0] == "answering" and response_started is not None:
