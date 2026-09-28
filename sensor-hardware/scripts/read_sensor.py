@@ -9,12 +9,12 @@ Type r + Enter while running to restart the baseline of the current session.
 
 import argparse
 import csv
-import glob
 import json
 import sys
 import threading
 
 import serial
+from serial.tools import list_ports
 
 FIELDS = [
     "t", "phase", "candidate", "hand", "away_s", "session_s", "finger", "hr", "hr_conf", "spo2",
@@ -23,10 +23,15 @@ FIELDS = [
 ]
 
 
+ADAFRUIT_USB_VID = 0x239A
+
+
 def find_port():
-    ports = glob.glob("/dev/cu.usbmodem*")
+    """The QT Py's serial port on macOS, Windows or Linux, found by its Adafruit USB ID."""
+    ports = [p.device for p in list_ports.comports() if p.vid == ADAFRUIT_USB_VID]
     if not ports:
-        sys.exit("No QT Py found (no /dev/cu.usbmodem* port).")
+        sys.exit("No QT Py found. Check the USB cable, or pass the port with --port "
+                 "(e.g. --port COM5 or --port /dev/ttyACM0).")
     return ports[0]
 
 

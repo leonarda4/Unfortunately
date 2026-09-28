@@ -4,6 +4,15 @@ This is probably the shortest code to implement realtime emotion monitoring.
 - Give this repository a ⭐ if you liked it, since it took me time to understand and implement this
 - Made with ❤️ by [Manish Tiwari](https://github.com/manish-9245)
 
+## Sensor hardware
+
+The heart rate, blood oxygen and skin conductance sensors on an Adafruit QT Py
+M0, the thermal printer and the live dashboard are in
+[`sensor-hardware/`](sensor-hardware/README.md). Its README covers the wiring,
+setting up a new computer, uploading the firmware, and getting the board out of
+the bootloader (green LED). Read it before uploading from another computer or
+through a coding agent.
+
 ## Dependencies
 
 - [deepface](https://github.com/serengil/deepface): A deep learning facial analysis library that provides pre-trained models for facial emotion detection. It relies on TensorFlow for the underlying deep learning operations.
