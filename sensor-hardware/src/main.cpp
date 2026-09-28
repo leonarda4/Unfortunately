@@ -2,6 +2,8 @@
 #include <Wire.h>
 #include <Adafruit_NeoPixel.h>
 #include <SparkFun_Bio_Sensor_Hub_Library.h>
+#include <ThermalStrip.h>
+#include <FlashStorage.h>
 
 // ---------------------------------------------------------------------------
 // Pins
@@ -15,14 +17,28 @@ const uint8_t HUB_MFIO_PIN  = A3;    // -> MFIO on the pulse oximeter
 const uint8_t GSR_PIN     = A0;      // -> SIG (yellow) on the Grove GSR sensor
 const uint8_t GSR_SAMPLES = 8;       // readings averaged per sample to smooth out noise
 
+// Thermal printer: its RX -> TX (A6), driven through Serial1
+
+// ---------------------------------------------------------------------------
+// Printer
+// ---------------------------------------------------------------------------
+const uint32_t PRINTER_BAUD          = 19200;  // shown on the printer's self-test page
+const uint8_t  PRINT_ROWS_PER_SAMPLE = 2;      // dot rows per sample: 2.5 mm of paper per second
+const float    PRINT_SCALE           = 10;     // bpm / % change shown 3/4 of the way to the edge; bigger ones are squeezed in
+const int      PRINT_SCALE_LABELS[]  = { -15, -5, 0, 5, 15 };  // printed above the graph, with faint guide lines
+const uint8_t  PRINT_CHAR_DOTS       = 12;     // width of one printed character
+const unsigned long PRINT_SPIKE_MARK_MS = 500; // marker length next to the GSR lane per spike
+const uint8_t  PRINT_END_FEED_LINES  = 3;      // blank paper after a session, to tear off
+
 // ---------------------------------------------------------------------------
 // Timing
 // ---------------------------------------------------------------------------
 const unsigned long SAMPLE_INTERVAL_MS = 100;  // 10 Hz processing and output
 const unsigned long BEAT_FLASH_MS      = 80;   // how long the pixel lights per beat
 
-const unsigned long HAND_ON_MS  = 1000;   // contact must hold this long to start a session
-const unsigned long HAND_OFF_MS = 1500;   // contact must be lost this long to end it
+const unsigned long HAND_ON_MS    = 1000;   // contact must hold this long to start a session
+const unsigned long HAND_BREAK_MS = 1500;   // a longer loss is a break: signals restart when the hand returns
+const unsigned long HAND_GONE_MS  = 10000;  // a loss this long ends the session, the next hand is a new candidate
 const unsigned long SETTLE_MS   = 5000;   // ignored at session start while electrodes settle
 const unsigned long BASELINE_MS = 10000;  // then used to measure the person's baseline
 
@@ -58,6 +74,9 @@ const char *PHASE_NAMES[] = { "idle", "baseline", "measuring" };
 Adafruit_NeoPixel pixel(1, PIXEL_PIN, NEO_GRB + NEO_KHZ800);
 SparkFun_Bio_Sensor_Hub bioHub(HUB_RESET_PIN, HUB_MFIO_PIN);
 bioData body;
+ThermalPrinter printer;
+StripChart chart(printer, PRINT_ROWS_PER_SAMPLE);
+FlashStorage(candidateStore, uint32_t);  // last candidate number, kept across power cycles
 
 Phase phase = IDLE;
 unsigned long lastSample = 0;
@@ -70,7 +89,10 @@ unsigned long handLastSeen  = 0;
 float gsrOpen = 0;  // raw GSR reading with nothing touching the electrodes
 
 // Session
-unsigned long sessionStart = 0;
+uint32_t candidate = 0;  // number of the current (or last) session
+unsigned long sessionStart  = 0;
+unsigned long baselineStart = 0;
+bool handAway = false;   // hand lifted for longer than HAND_BREAK_MS during a session
 float gsrFast    = 0;
 float gsrTonic   = 0;
 float gsrBase    = NAN;
@@ -179,20 +201,125 @@ void fail(const char *message) {
 // ---------------------------------------------------------------------------
 // Session handling
 // ---------------------------------------------------------------------------
+// Candidate numbers count up across power cycles. Uploading firmware resets them.
+uint32_t nextCandidate() {
+  uint32_t number = candidateStore.read() + 1;
+  candidateStore.write(number);
+  return number;
+}
+
+// Printed at session start, while the baseline is measured: candidate number,
+// how to read the graph and the lane labels. The graph follows right below.
+// Scale numbers, each centred over its position on the graph
+void printScaleLabels() {
+  const uint8_t COLUMNS = ThermalPrinter::WIDTH_DOTS / PRINT_CHAR_DOTS;
+  char line[COLUMNS + 2];
+  memset(line, ' ', COLUMNS);
+  for (int value : PRINT_SCALE_LABELS) {
+    char label[8];
+    snprintf(label, sizeof label, value == 0 ? "0" : "%+d", value);
+    int length = strlen(label);
+    int column = lroundf((chart.position(0, value) - length * PRINT_CHAR_DOTS / 2.0) / PRINT_CHAR_DOTS);
+    column = constrain(column, 0, COLUMNS - length);
+    memcpy(line + column, label, length);
+  }
+  int end = COLUMNS;
+  while (end > 0 && line[end - 1] == ' ') end--;
+  line[end] = '\n';
+  line[end + 1] = '\0';
+  printer.text(line);
+}
+
+// Printed at session start, while the baseline is measured: candidate number,
+// how to read the graph and the scale. The graph follows right below.
+void printHeader() {
+  char line[40];
+  printer.align('C');
+  printer.style(true, false);
+  printer.text("CANDIDATE\n");
+  printer.style(true, true);
+  snprintf(line, sizeof line, "#%04lu\n", (unsigned long)candidate);
+  printer.text(line);
+  printer.feed(1);
+
+  // 32 characters per line
+  printer.align('L');
+  printer.style(true, false);
+  printer.text("HOW TO READ THIS\n");
+  printer.style(false, false);
+  printer.text("Time runs down the paper.\n"
+               "Dotted line: heart rate (bpm)\n"
+               "Solid line: skin conductance\n"
+               "(%), rises when you sweat.\n"
+               "Centre = your resting level,\n");
+  snprintf(line, sizeof line, "measured in the first %lu s.\n", (SETTLE_MS + BASELINE_MS) / 1000);
+  printer.text(line);
+  printer.text("Right = higher, left = lower.\n"
+               "Big changes are squeezed in\n"
+               "near the edges.\n"
+               "Tick = 1 s, fine line = 10 s.\n"
+               "Dashed line = hand lifted.\n"
+               "Mark at the right = sudden\n"
+               "sweat response.\n");
+  printer.feed(1);
+  printScaleLabels();
+}
+
+// Also restarts the baseline within a session: 'r' command, or a break during the baseline
 void startBaseline(unsigned long now, float level) {
   phase = BASELINE;
-  sessionStart = now;
+  baselineStart = now;
   gsrFast = gsrTonic = level;
   gsrBase = hrBase = lastGoodHr = NAN;
   baselineGsrCount = baselineHrCount = 0;
   historyIndex = historyCount = 0;
-  spikeCount = 0;
   spikeArmed = true;
   gsrChange = gsrTrend = gsrPhasic = hrChange = NAN;
   levelLabel = trendLabel = nullptr;
 
-  beginEvent("session_start", now);
+  beginEvent("baseline_start", now);
   Serial.println('}');
+}
+
+void startSession(unsigned long now, float level) {
+  candidate = nextCandidate();
+  sessionStart = now;
+  spikeCount = 0;
+  handAway = false;
+  chart.start();
+
+  beginEvent("session_start", now);
+  printInt("candidate", candidate);
+  Serial.println('}');
+
+  printHeader();
+  startBaseline(now, level);
+}
+
+void handLifted(unsigned long now) {
+  handAway = true;
+  beginEvent("hand_lifted", now);
+  Serial.println('}');
+}
+
+// The same candidate put the hand back after a break. The signals jump when the
+// electrodes touch again, so the baseline starts over if it was still being
+// measured. Otherwise only the smoothing and the trend restart from the current level.
+void handReturned(unsigned long now, float level, unsigned long awayMs) {
+  handAway = false;
+  beginEvent("hand_returned", now);
+  printNum("away_s", awayMs / 1000.0);
+  Serial.println('}');
+
+  if (phase == BASELINE) {
+    startBaseline(now, level);
+  } else {
+    gsrFast = gsrTonic = level;
+    historyIndex = historyCount = 0;
+    gsrTrend = NAN;
+    trendLabel = nullptr;
+    chart.gap();
+  }
 }
 
 void finishBaseline(unsigned long now) {
@@ -208,7 +335,8 @@ void finishBaseline(unsigned long now) {
 
 void endSession(unsigned long now) {
   beginEvent("session_end", now);
-  printNum("duration_s", (now - sessionStart) / 1000.0);
+  printInt("candidate", candidate);
+  printNum("duration_s", (handLastSeen - sessionStart) / 1000.0);
   printNum("gsr_base", gsrBase);
   printNum("gsr_change", gsrChange);
   printNum("hr_base", hrBase);
@@ -216,6 +344,7 @@ void endSession(unsigned long now) {
   printInt("spikes", spikeCount);
   Serial.println('}');
 
+  printer.feed(PRINT_END_FEED_LINES);
   phase = IDLE;
 }
 
@@ -235,6 +364,7 @@ void processSample(unsigned long now) {
 
   // A hand counts only when both sensors agree, debounced both ways
   bool handNow = fingerOn && gsrContact;
+  unsigned long awayMs = now - handLastSeen;  // read before it is updated: length of a break that just ended
   if (handNow) {
     if (!handSeen) handFirstSeen = now;
     handLastSeen = now;
@@ -244,17 +374,22 @@ void processSample(unsigned long now) {
   // Skin conductance proxy: higher = more sweat = more arousal
   float level = gsrOpen - gsrRaw;
 
-  if (phase == IDLE && handSeen && now - handFirstSeen >= HAND_ON_MS) {
-    startBaseline(now, level);
-  } else if (phase != IDLE && now - handLastSeen >= HAND_OFF_MS) {
-    endSession(now);
+  // Short losses are ignored, longer ones pause the session, very long ones end it
+  if (phase == IDLE) {
+    if (handSeen && now - handFirstSeen >= HAND_ON_MS) startSession(now, level);
+  } else if (!handSeen) {
+    if (awayMs >= HAND_GONE_MS) endSession(now);
+    else if (awayMs >= HAND_BREAK_MS && !handAway) handLifted(now);
+  } else if (handAway) {
+    handReturned(now, level, awayMs);
   }
 
   if (fingerOn && body.confidence >= HR_MIN_CONFIDENCE && body.heartRate > 0) {
     lastGoodHr = body.heartRate;
   }
 
-  if (phase != IDLE) {
+  // Signals are only processed while the hand is on the sensors
+  if (phase != IDLE && handSeen) {
     float dt = SAMPLE_INTERVAL_MS / 1000.0;
     gsrFast  += (level - gsrFast)  * dt / (FAST_TAU_S + dt);
     gsrTonic += (level - gsrTonic) * dt / (TONIC_TAU_S + dt);
@@ -266,7 +401,7 @@ void processSample(unsigned long now) {
     historyIndex = (historyIndex + 1) % TREND_SAMPLES;
     if (historyCount < TREND_SAMPLES) historyCount++;
 
-    unsigned long elapsed = now - sessionStart;
+    unsigned long elapsed = now - baselineStart;
 
     if (phase == BASELINE && elapsed >= SETTLE_MS) {
       if (baselineGsrCount < BASELINE_SAMPLES) baselineGsr[baselineGsrCount++] = gsrTonic;
@@ -302,11 +437,22 @@ void processSample(unsigned long now) {
     }
   }
 
+  // Graph on the thermal printer while a hand is on the sensors. The traces show
+  // change against the baseline, so the graph starts once it is known; the
+  // header printed at session start fills the paper until then.
+  if (phase == MEASURING && handSeen) {
+    float values[] = { hrChange, gsrChange };
+    bool spikeMark = spikeCount > 0 && now - lastSpike < PRINT_SPIKE_MARK_MS;
+    chart.add(values, spikeMark ? 0b10 : 0);
+  }
+
   // One JSON line per sample
   Serial.print("{\"t\":");
   Serial.print(now);
   printStr("phase", PHASE_NAMES[phase]);
+  printInt("candidate", candidate);
   printInt("hand", handSeen);
+  printNum("away_s", phase != IDLE && !handSeen ? awayMs / 1000.0 : NAN);
   printNum("session_s", phase == IDLE ? NAN : (now - sessionStart) / 1000.0);
   printInt("finger", body.status);
   printInt("hr", body.heartRate);
@@ -314,7 +460,7 @@ void processSample(unsigned long now) {
   printInt("spo2", body.oxygen);
   printInt("gsr_raw", gsrRaw);
   printNum("gsr_open", gsrOpen);
-  printNum("gsr", phase == IDLE ? NAN : gsrTonic);
+  printNum("gsr", phase == IDLE || !handSeen ? NAN : gsrTonic);
   printNum("gsr_base", gsrBase);
   printNum("gsr_change", gsrChange);
   printNum("gsr_trend", gsrTrend);
@@ -332,7 +478,10 @@ void processSample(unsigned long now) {
 void handleCommands(unsigned long now) {
   while (Serial.available()) {
     char c = Serial.read();
-    if (c == 'r' && phase != IDLE) startBaseline(now, gsrTonic);
+    if (c == 'r' && phase != IDLE) {
+      if (phase == MEASURING) chart.gap();
+      startBaseline(now, gsrTonic);
+    }
   }
 }
 
@@ -374,6 +523,15 @@ void setup() {
 
   gsrOpen = readGsr();  // assumes nobody is wearing the GSR electrodes at power-up
 
+  // Heart rate and GSR change share the full paper width and one scale
+  printer.begin(Serial1, PRINTER_BAUD);
+  chart.addLane(12, 372, -PRINT_SCALE, PRINT_SCALE, 3, 2, true);  // heart rate: dotted
+  chart.addLane(12, 372, -PRINT_SCALE, PRINT_SCALE, 5, 0, true);  // GSR: solid, thicker
+  for (int value : PRINT_SCALE_LABELS) {
+    if (value != 0) chart.addGuide(0, value);
+  }
+  chart.setGrid(10, 100);  // tick every second, line every 10 s
+
   beginEvent("ready", millis());
   Serial.println('}');
 }
@@ -383,6 +541,7 @@ void loop() {
 
   readLatestBpm();
   handleCommands(now);
+  printer.update();
 
   if (now - lastSample >= SAMPLE_INTERVAL_MS) {
     lastSample = now;

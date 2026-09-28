@@ -38,6 +38,7 @@ BLINK_MIN_FRAMES = 1
 SENSOR_BAUD = 115200
 GRAPH_SAMPLES = 120
 GRAPH_SAMPLE_INTERVAL = 0.5
+CALIBRATION_BREAK_SECONDS = 15.0
 CALIBRATION_MUSIC_SAMPLE_RATE = 22050
 FONT_PATHS = (
     Path("/System/Library/Fonts/Helvetica.ttc"),
@@ -448,6 +449,10 @@ def sensor_calibration_action(phase, connected):
     if phase == "idle":
         return "retry"
     return "wait"
+
+
+def calibration_break_complete(started_at, now):
+    return started_at is not None and now - started_at >= CALIBRATION_BREAK_SECONDS
 
 
 def eye_aspect_ratio(landmarks, horizontal_left, horizontal_right, vertical_top, vertical_bottom):
@@ -1044,16 +1049,7 @@ def main():
                     calibration_music_active = True
                 except Exception as error:
                     print(f"Calibration music unavailable: {error}", flush=True)
-
-                def speak_calibration_notice():
-                    subprocess.run(
-                        ["say", "Calibration in progress. Please wait."],
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-
-                threading.Thread(target=speak_calibration_notice, daemon=True).start()
+                speak("I need 15 seconds to calibrate.")
 
             def start_scan_sequence():
                 nonlocal scan_sequence, scan_index, scan_stable_frames
@@ -1336,7 +1332,7 @@ def main():
                         start_instruction(HEAD_PROMPT, "head")
                 elif workflow_stage[0] == "waiting_for_hand":
                     calibration_action = sensor_calibration_action(sensor_metrics.phase, sensor_metrics.connected)
-                    if calibration_action == "start":
+                    if calibration_action in ("start", "complete"):
                         start_calibration()
                     elif calibration_action == "skip":
                         begin_questions()
@@ -1344,7 +1340,8 @@ def main():
                         start_instruction(HAND_PROMPT, "hand")
                 elif workflow_stage[0] == "calibrating":
                     calibration_action = sensor_calibration_action(sensor_metrics.phase, sensor_metrics.connected)
-                    if calibration_action == "complete":
+                    calibration_break_elapsed = calibration_break_complete(calibration_started_at, now)
+                    if calibration_action == "complete" and calibration_break_elapsed:
                         stop_calibration_music()
                         log_event({
                             "event": "calibration_completed",

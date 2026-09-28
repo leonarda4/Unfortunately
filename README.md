@@ -41,10 +41,11 @@ If a QT Py sensor board is connected, its latest heart rate, SpO2, GSR change,
 level, trend, and spike count appear during the come-closer phase and are
 included in the terminal summary. Use `--sensor-port /dev/cu.usbmodemXXXX` to
 select a port, or `--no-sensors` to disable serial readings.
-After sensor contact starts its baseline, the app says “Calibration in
-progress. Please wait.” and plays a synthesized elevator-style instrumental
-loop until the sensor enters its measuring phase. If the sensor disconnects,
-the music stops and the screening continues without sensor calibration.
+After asking you to place your fingers on the sensors, the app says “I need 15
+seconds to calibrate.” It holds the screening for at least 15 seconds while the
+sensor baseline completes and plays a synthesized instrumental loop. If the
+sensor disconnects, the music stops and the screening continues without sensor
+calibration.
 Answers end after one second of silence by default; use `--silence` and
 `--max-seconds` to adjust answer capture. The women-specific audio prompt looks
 for optional clips named `laugh*.wav`, `cry*.wav`, or `speak*.wav` in `sounds/`;
